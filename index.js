@@ -46,6 +46,17 @@ io.on("connection", (socket) => {
           })
         );
 
+        // Send the host a message for each user in the waiting lobby
+        waitingLobby.forEach((client) => {
+          host.send(
+            JSON.stringify({
+              type: "guest_joined",
+              guestId: client.id,
+              username: client.username,
+            })
+          );
+        });
+
         // Start the timer to end the meeting after 15 minutes if no guests join
         endMeetingTimer = setTimeout(() => {
           if (waitingLobby.length === 0) {
@@ -58,14 +69,15 @@ io.on("connection", (socket) => {
             host.disconnect(true);
             host = null;
           }
-        }, 1 * 60 * 1000);
+        }, 15 * 60 * 1000); // Adjusted to 1 minute for testing purposes
       }
 
       if (data.type === "join_lobby" && data.role === 0) {
         // Guest joins lobby
 
         const guestId = generateUniqueId();
-        waitingLobby.push({ socket, id: guestId });
+        const guest = { socket, id: guestId, username: data.userName };
+        waitingLobby.push(guest);
         socket.send(
           JSON.stringify({
             type: "waiting",
@@ -78,7 +90,7 @@ io.on("connection", (socket) => {
             JSON.stringify({
               type: "guest_joined",
               guestId,
-              username: data.userName,
+              username: guest.username,
             })
           );
         }
