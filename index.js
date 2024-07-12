@@ -134,6 +134,25 @@ io.on("connection", (socket) => {
           waitingLobby = waitingLobby.filter((client) => client !== guest);
         }
       }
+
+      if (data.type === "guest_leave") {
+        const guest = waitingLobby.find((client) => client.socket === socket);
+        if (guest) {
+          waitingLobby = waitingLobby.filter((client) => client !== guest);
+          socket.disconnect();
+
+          // Notify the host that a guest has left the meeting
+          if (host) {
+            host.send(
+              JSON.stringify({
+                type: "guest_leave_meeting",
+                guestId: guest.id,
+                username: guest.username,
+              })
+            );
+          }
+        }
+      }
     } catch (error) {
       console.error("Error processing message:", error);
     }
