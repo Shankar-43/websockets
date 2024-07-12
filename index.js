@@ -27,8 +27,31 @@ io.on("connection", (socket) => {
       host = null;
       waitingLobby = [];
       clearTimeout(endMeetingTimer);
+
+      // Notify all clients that the host ended the meeting
+      io.emit(
+        "message",
+        JSON.stringify({
+          type: "host_end_meeting",
+          message: "The host has ended the meeting.",
+        })
+      );
     } else {
-      waitingLobby = waitingLobby.filter((client) => client.socket !== socket);
+      const guest = waitingLobby.find((client) => client.socket === socket);
+      if (guest) {
+        waitingLobby = waitingLobby.filter((client) => client !== guest);
+        
+        // Notify the host that a guest has left the meeting
+        if (host) {
+          host.send(
+            JSON.stringify({
+              type: "guest_leave_meeting",
+              guestId: guest.id,
+              username: guest.username,
+            })
+          );
+        }
+      }
     }
   });
 
@@ -121,8 +144,8 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(3001, () => {
-  console.log("listening on *:3001");
+server.listen(8080, () => {
+  console.log("listening on *:8080");
 });
 
 // Function to generate unique ids for guests
