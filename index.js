@@ -1,3 +1,4 @@
+const { log } = require("console");
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -29,7 +30,7 @@ io.on("connection", (socket) => {
       clearTimeout(endMeetingTimer);
 
       // Notify all clients that the host ended the meeting
-      io.emit(
+      socket.send(
         "message",
         JSON.stringify({
           type: "host_end_meeting",
@@ -40,7 +41,7 @@ io.on("connection", (socket) => {
       const guest = waitingLobby.find((client) => client.socket === socket);
       if (guest) {
         waitingLobby = waitingLobby.filter((client) => client !== guest);
-        
+        console.log("waitingLobby",waitingLobby);
         // Notify the host that a guest has left the meeting
         if (host) {
           host.send(
@@ -135,8 +136,22 @@ io.on("connection", (socket) => {
         }
       }
 
+      if (data.type === "reject_guest" && host === socket) {
+        const guest = waitingLobby.find((client) => client.id === data.guestID);
+        if (guest) {
+          guest.socket.send(
+            JSON.stringify({
+              type: "rejected",
+              message: "You are not allowed to join the meeting.",
+            })
+          );
+          waitingLobby = waitingLobby.filter((client) => client !== guest);
+        }
+      }
+
       if (data.type === "guest_leave") {
         const guest = waitingLobby.find((client) => client.socket === socket);
+        console.log("guest",guest);
         if (guest) {
           waitingLobby = waitingLobby.filter((client) => client !== guest);
           socket.disconnect();
