@@ -1,4 +1,3 @@
-const { log } = require("console");
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -7,6 +6,7 @@ const app = express();
 app.get("/", (req, res) => {
   res.send("WebSocket server is running.");
 });
+
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
@@ -16,157 +16,206 @@ const io = new Server(server, {
 });
 
 let waitingLobby = [];
-let host = null;
+let joinedPatients = [];
+let doctor = null;
 let endMeetingTimer = null;
+let meetingExpired = false;
 
-io.on("connection", (socket) => {
-  console.log("a user connected");
+function handleDoctorJoin(socket, data) {
+  if (meetingExpired) {
+    socket.send(
+      JSON.stringify({
+        type: "meeting_expired",
+        message: "The meeting has expired.",
+      })
+    );
+    socket.disconnect();
+    return;
+  }
 
-  socket.on("disconnect", () => {
-    console.log("user disconnected");
-    if (socket === host) {
-      host = null;
-      waitingLobby = [];
-      clearTimeout(endMeetingTimer);
+  doctor = socket;
+  doctor.sessionId = data.sessionID;
+  console.log("Doctor joined:", doctor.sessionId);
 
-      // Notify all clients that the host ended the meeting
-      socket.send(
-        "message",
+  socket.send(
+    JSON.stringify({
+      type: "doctor_joined",
+      message: "Doctor has joined the meeting.",
+    })
+  );
+
+  waitingLobby.forEach((client) => {
+    doctor.send(
+      JSON.stringify({
+        type: "patient_request",
+        patientId: client.id,
+        username: client.username,
+      })
+    );
+  });
+
+  endMeetingTimer = setTimeout(() => {
+    if (waitingLobby.length === 0 && joinedPatients.length === 0 && doctor) {
+      doctor.send(
         JSON.stringify({
-          type: "host_end_meeting",
-          message: "The host has ended the meeting.",
+          type: "end_meeting",
+          message: "No patients joined. Meeting is ended.",
+        })
+      );
+
+      doctor.disconnect(true);
+      doctor = null;
+    }
+  }, 15 * 60 * 1000);
+}
+
+function handlePatientJoin(socket, data) {
+  const patientId = data.sessionID;
+  const patient = { socket, id: patientId, username: data.userName };
+
+  // Remove patient from waitingLobby and joinedPatients if they rejoin
+  waitingLobby = waitingLobby.filter((client) => client.id !== patientId);
+  joinedPatients = joinedPatients.filter((client) => client.id !== patientId);
+
+  waitingLobby.push(patient);
+  socket.send(
+    JSON.stringify({
+      type: "waiting",
+      message: "Please wait in the lobby.",
+      patientId,
+    })
+  );
+
+  if (doctor) {
+    doctor.send(
+      JSON.stringify({
+        type: "patient_request",
+        patientId,
+        username: patient.username,
+      })
+    );
+  }
+
+  if (endMeetingTimer) {
+    clearTimeout(endMeetingTimer);
+  }
+}
+
+function handlePatientApproval(socket, data) {
+  if (doctor && doctor.id === socket.id) {
+    const patient = waitingLobby.find((client) => client.id === data.patientID);
+    if (patient) {
+      patient.socket.send(
+        JSON.stringify({
+          type: "approved",
+          message: "You are approved to join the meeting.",
+          patientID: data.patientID,
+        })
+      );
+
+      joinedPatients.push(patient);
+      waitingLobby = waitingLobby.filter((client) => client !== patient);
+    }
+  }
+}
+
+function handlePatientRejection(socket, data) {
+  if (doctor && doctor.id === socket.id) {
+    const patient = waitingLobby.find((client) => client.id === data.patientID);
+    if (patient) {
+      patient.socket.send(
+        JSON.stringify({
+          type: "rejected",
+          message: "You are not allowed to join the meeting.",
+        })
+      );
+
+      waitingLobby = waitingLobby.filter((client) => client !== patient);
+    }
+  }
+}
+function handlePatientLeaveMeeting(socket, data) {
+  const patient = joinedPatients.find((p) => p.id === data.patientId);
+  if (patient) {
+    joinedPatients = joinedPatients.filter((p) => p.socket.id !== patient.id);
+
+    if (doctor) {
+      doctor.send(
+        JSON.stringify({
+          type: "patient_leave",
+          message: `Patient  left the meeting.`,
         })
       );
     } else {
-      const guest = waitingLobby.find((client) => client.socket === socket);
-      if (guest) {
-        waitingLobby = waitingLobby.filter((client) => client !== guest);
-        console.log("waitingLobby",waitingLobby);
-        // Notify the host that a guest has left the meeting
-        if (host) {
-          host.send(
-            JSON.stringify({
-              type: "guest_leave_meeting",
-              guestId: guest.id,
-              username: guest.username,
-            })
-          );
-        }
-      }
+      console.log("Doctor is null when patient leaves");
     }
+    console.log("Disconnecting patient socket id:", patient.socket.id);
+    patient.socket.disconnect(); // Ensure the patient socket is disconnected
+  } else {
+    console.log("Patient not found in joinedPatients:", data.patientId);
+  }
+}
+
+function handleDoctorEndMeeting(socket, data) {
+  const patient = joinedPatients.find((p) => p.id === data.patientID);
+  if (patient) {
+    patient.socket.send(
+      JSON.stringify({
+        type: "doctor_end_meeting",
+        message: "The doctor has ended the meeting.",
+      })
+    );
+    patient.socket.disconnect();
+  }
+
+  doctor.send(
+    JSON.stringify({
+      type: "doctor_end_meeting",
+      message: "You have ended the meeting.",
+    })
+  );
+
+  doctor.disconnect(true);
+  doctor = null;
+  joinedPatients = [];
+  waitingLobby = [];
+  meetingExpired = true;
+  if (endMeetingTimer) {
+    clearTimeout(endMeetingTimer);
+    endMeetingTimer = null;
+  }
+}
+
+io.on("connection", (socket) => {
+  socket.on("disconnect", () => {
+    // Handle disconnection logic if needed
   });
 
-  socket.on("message", (msg) => {
+  socket.on("message", async (msg) => {
     try {
       const data = JSON.parse(msg);
 
-      if (data.type === "join_meeting" && data.role === 1) {
-        // Host joins
-        host = socket;
-        socket.send(
-          JSON.stringify({
-            type: "host_joined",
-            message: "Host has joined the meeting.",
-          })
-        );
-
-        // Send the host a message for each user in the waiting lobby
-        waitingLobby.forEach((client) => {
-          host.send(
-            JSON.stringify({
-              type: "guest_joined",
-              guestId: client.id,
-              username: client.username,
-            })
-          );
-        });
-
-        // Start the timer to end the meeting after 15 minutes if no guests join
-        endMeetingTimer = setTimeout(() => {
-          if (waitingLobby.length === 0) {
-            host.send(
-              JSON.stringify({
-                type: "end_meeting",
-                message: "No guests joined. Meeting is ended.",
-              })
-            );
-            host.disconnect(true);
-            host = null;
-          }
-        }, 15 * 60 * 1000); // Adjusted to 1 minute for testing purposes
-      }
-
-      if (data.type === "join_lobby" && data.role === 0) {
-        // Guest joins lobby
-
-        const guestId = generateUniqueId();
-        const guest = { socket, id: guestId, username: data.userName };
-        waitingLobby.push(guest);
-        socket.send(
-          JSON.stringify({
-            type: "waiting",
-            message: "Please wait in the lobby.",
-            guestId,
-          })
-        );
-        if (host) {
-          host.send(
-            JSON.stringify({
-              type: "guest_joined",
-              guestId,
-              username: guest.username,
-            })
-          );
-        }
-
-        // Clear the timer if a guest joins
-        clearTimeout(endMeetingTimer);
-      }
-
-      if (data.type === "approve_guest" && host === socket) {
-        const guest = waitingLobby.find((client) => client.id === data.guestID);
-        if (guest) {
-          guest.socket.send(
-            JSON.stringify({
-              type: "approved",
-              message: "You are approved to join the meeting.",
-            })
-          );
-          waitingLobby = waitingLobby.filter((client) => client !== guest);
-        }
-      }
-
-      if (data.type === "reject_guest" && host === socket) {
-        const guest = waitingLobby.find((client) => client.id === data.guestID);
-        if (guest) {
-          guest.socket.send(
-            JSON.stringify({
-              type: "rejected",
-              message: "You are not allowed to join the meeting.",
-            })
-          );
-          waitingLobby = waitingLobby.filter((client) => client !== guest);
-        }
-      }
-
-      if (data.type === "guest_leave") {
-        const guest = waitingLobby.find((client) => client.socket === socket);
-        console.log("guest",guest);
-        if (guest) {
-          waitingLobby = waitingLobby.filter((client) => client !== guest);
-          socket.disconnect();
-
-          // Notify the host that a guest has left the meeting
-          if (host) {
-            host.send(
-              JSON.stringify({
-                type: "guest_leave_meeting",
-                guestId: guest.id,
-                username: guest.username,
-              })
-            );
-          }
-        }
+      switch (data.type) {
+        case "join_meeting":
+          if (data.role === 1) handleDoctorJoin(socket, data);
+          break;
+        case "waiting_lobby":
+          if (data.role === 0) handlePatientJoin(socket, data);
+          break;
+        case "approve_patient":
+          handlePatientApproval(socket, data);
+          break;
+        case "reject_patient":
+          handlePatientRejection(socket, data);
+          break;
+        case "patient_leave_meeting":
+          handlePatientLeaveMeeting(socket, data);
+          break;
+        case "doctor_end":
+          handleDoctorEndMeeting(socket, data);
+          break;
+        default:
+          console.error("Unknown message type:", data.type);
       }
     } catch (error) {
       console.error("Error processing message:", error);
@@ -179,10 +228,5 @@ io.on("connection", (socket) => {
 });
 
 server.listen(8080, () => {
-  console.log("listening on *:8080");
+  console.log("Listening on *:8080");
 });
-
-// Function to generate unique ids for guests
-function generateUniqueId() {
-  return Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
-}
