@@ -19,23 +19,10 @@ let waitingLobby = [];
 let joinedPatients = [];
 let doctor = null;
 let endMeetingTimer = null;
-let meetingExpired = false;
 
 function handleDoctorJoin(socket, data) {
-  if (meetingExpired) {
-    socket.send(
-      JSON.stringify({
-        type: "meeting_expired",
-        message: "The meeting has expired.",
-      })
-    );
-    socket.disconnect();
-    return;
-  }
-
   doctor = socket;
   doctor.sessionId = data.sessionID;
-  console.log("Doctor joined:", doctor.sessionId);
 
   socket.send(
     JSON.stringify({
@@ -73,7 +60,6 @@ function handlePatientJoin(socket, data) {
   const patientId = data.sessionID;
   const patient = { socket, id: patientId, username: data.userName };
 
-  // Remove patient from waitingLobby and joinedPatients if they rejoin
   waitingLobby = waitingLobby.filter((client) => client.id !== patientId);
   joinedPatients = joinedPatients.filter((client) => client.id !== patientId);
 
@@ -134,6 +120,7 @@ function handlePatientRejection(socket, data) {
     }
   }
 }
+
 function handlePatientLeaveMeeting(socket, data) {
   const patient = joinedPatients.find((p) => p.id === data.patientId);
   if (patient) {
@@ -143,52 +130,101 @@ function handlePatientLeaveMeeting(socket, data) {
       doctor.send(
         JSON.stringify({
           type: "patient_leave",
-          message: `Patient  left the meeting.`,
+          message: `Patient left the meeting.`,
         })
       );
     } else {
       console.log("Doctor is null when patient leaves");
     }
     console.log("Disconnecting patient socket id:", patient.socket.id);
-    patient.socket.disconnect(); // Ensure the patient socket is disconnected
+    patient.socket.disconnect();
   } else {
     console.log("Patient not found in joinedPatients:", data.patientId);
   }
 }
 
-function handleDoctorEndMeeting(socket, data) {
-  const patient = joinedPatients.find((p) => p.id === data.patientID);
-  if (patient) {
-    patient.socket.send(
-      JSON.stringify({
-        type: "doctor_end_meeting",
-        message: "The doctor has ended the meeting.",
-      })
+function handlePatientJoinMeeting(socket, data) {
+  const patientId = data.sessionID;
+  const patient = { socket, id: patientId, username: data.userName };
+
+  // Remove the existing socket for the patient if it exists
+  const existingPatientIndex = joinedPatients.findIndex(
+    (p) => p.id === patientId
+  );
+  if (existingPatientIndex !== -1) {
+    const existingPatient = joinedPatients[existingPatientIndex];
+    console.log(
+      `Disconnecting existing patient socket id: ${existingPatient.socket.id}`
     );
-    patient.socket.disconnect();
+    existingPatient.socket.disconnect();
+    joinedPatients.splice(existingPatientIndex, 1);
   }
 
-  doctor.send(
+  // Add the new socket for the patient
+  joinedPatients.push(patient);
+
+  if (doctor) {
+    doctor.send(
+      JSON.stringify({
+        type: "patient_joined",
+        message: `${patient.username} has joined the meeting.`,
+      })
+    );
+  }
+
+  // Notify the patient that they have successfully joined the meeting
+  socket.send(
     JSON.stringify({
-      type: "doctor_end_meeting",
-      message: "You have ended the meeting.",
+      type: "joined_meeting",
+      message: "You have successfully joined the meeting.",
     })
   );
 
-  doctor.disconnect(true);
-  doctor = null;
-  joinedPatients = [];
-  waitingLobby = [];
-  meetingExpired = true;
-  if (endMeetingTimer) {
-    clearTimeout(endMeetingTimer);
-    endMeetingTimer = null;
+  console.log(`Patient ${patient.id} joined the meeting.`);
+}
+
+function handleDoctorEndMeeting(socket) {
+
+  if (doctor && doctor.id === socket.id) {
+    const endMessage = {
+      type: "doctor_end_meeting",
+      message: "The doctor has ended the meeting.",
+    };
+
+    const filterJoinedPatients = joinedPatients.filter(
+      (patient) => patient.socket && patient.socket.connected
+    );
+    filterJoinedPatients.forEach((patient) => {
+      if (patient.socket.connected) {
+        patient.socket.send(JSON.stringify(endMessage), (error) => {
+          if (error) {
+            console.error("Error sending message to patient:", error);
+          } else {
+            console.log("Message sent to patient:", patient.id);
+          }
+          patient.socket.disconnect(true);
+        });
+      }
+    });
+
+    joinedPatients = [];
+    waitingLobby = [];
+    doctor.send(JSON.stringify(endMessage));
+    doctor.disconnect(true);
+    doctor = null;
+
+    if (endMeetingTimer) {
+      clearTimeout(endMeetingTimer);
+      endMeetingTimer = null;
+    }
   }
 }
 
 io.on("connection", (socket) => {
-  socket.on("disconnect", () => {
-    // Handle disconnection logic if needed
+  console.log(`Socket connected: ${socket.id}`);
+
+  socket.on("disconnect", (reason) => {
+    console.log(`Socket disconnected: ${socket.id}, Reason: ${reason}`);
   });
 
   socket.on("message", async (msg) => {
@@ -214,8 +250,11 @@ io.on("connection", (socket) => {
         case "doctor_end":
           handleDoctorEndMeeting(socket, data);
           break;
+        case "patient_join_meeting":
+          handlePatientJoinMeeting(socket, data);
+          break;
         default:
-          console.error("Unknown message type:", data.type);
+          console.error("Unknown message type:", data);
       }
     } catch (error) {
       console.error("Error processing message:", error);
